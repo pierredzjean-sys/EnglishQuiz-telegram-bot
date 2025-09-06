@@ -42,7 +42,7 @@ async def send_quiz(bot, chat_id, theme, started_by):
     global current_quiz, quiz_answers, quiz_task
 
     q = random.choice(QUIZ_DATA[theme])
-    quiz_answers = {}  # reset des réponses
+    quiz_answers = {}
 
     poll_message = await bot.send_poll(
         chat_id=chat_id,
@@ -72,17 +72,17 @@ async def end_quiz(bot: Bot, forced=False):
     if not current_quiz:
         return
 
+    # Attendre la durée du quiz si ce n’est pas forcé
+    if not forced:
+        await asyncio.sleep(QUIZ_DURATION)
+
     q = current_quiz["question"]
     chat_id = current_quiz["chat_id"]
 
-    # ✅ Déterminer les gagnants
     correct_id = q["answer"]
     winners = [name for name, ans in quiz_answers.items() if ans == correct_id]
-
-    # 🏆 Classement (les premiers à répondre juste sont devant)
     classement = "\n".join([f"{i+1}. {name}" for i, name in enumerate(winners)]) if winners else "❌ Personne n’a trouvé."
 
-    # Envoi du résultat
     await bot.send_message(
         chat_id=chat_id,
         text=f"✅ Réponse correcte : {q['options'][q['answer']]}\n"
@@ -108,7 +108,8 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if theme not in QUIZ_DATA:
         await update.message.reply_text("⚠️ Thème inconnu. Utilise /quiz english ou /quiz cyber.")
         return
-        await send_quiz(context.bot, update.effective_chat.id, theme, update.effective_user.full_name)
+
+    await send_quiz(context.bot, update.effective_chat.id, theme, update.effective_user.full_name)
 
 async def stop_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = await context.bot.get_chat(GROUP_ID)
@@ -120,16 +121,13 @@ async def stop_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await end_quiz(context.bot, forced=True)
 
 # ======================= MAIN =======================
-async def main():
+def main():
     print("🤖 Bot prêt : /quiz, /quiz english, /quiz cyber, /stopquiz")
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("quiz", quiz_command))
     app.add_handler(CommandHandler("stopquiz", stop_quiz_command))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
-
-    await app.run_polling()
+    app.run_polling()
 
 if __name__=="__main__":
-    asyncio.run(main())
-        
+    main()
