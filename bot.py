@@ -4,31 +4,44 @@
 import os
 import asyncio
 import random
-from telegram import Bot, Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, PollAnswerHandler
 
 # ======================= CONFIG =======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = -1002882014486
 QUIZ_DURATION = 20  # secondes
+TIMER_INTERVAL = 5  # intervalle compte à rebours
 
 # ======================= QUIZ DATA =======================
 QUIZ_DATA = {
-    "english": [
-        {"question":"Choose the correct form: She ____ to school every day.",
-         "options":["go","goes","going","gone"],
-         "answer":1,"lesson":"Avec 'she/he/it', on ajoute -s : She goes to school."},
-        {"question":"What is the opposite of 'difficult'?",
-         "options":["Hard","Easy","Complicated","Tough"],
-         "answer":1,"lesson":"Le contraire de 'difficult' est 'easy'."}
+    "A1": [
+        {"question":"What is the plural of 'cat'?",
+         "options":["cats","cat","cates","catt"],
+         "answer":0,"lesson":"Plural of most nouns: add -s → cats."},
+        {"question":"Choose the correct form: I ____ a book.",
+         "options":["am read","reads","read","reading"],
+         "answer":2,"lesson":"Use simple present for 'I': I read a book."}
     ],
-    "cyber": [
-        {"question":"Qu’est-ce que le phishing ?",
-         "options":["Un virus informatique","Un mail trompeur pour voler des infos","Un antivirus","Un pare-feu"],
-         "answer":1,"lesson":"Le phishing vise à voler des données via de faux messages."},
-        {"question":"Quel est le mot de passe le plus sécurisé ?",
-         "options":["123456","password","M@n!2025#","abcdef"],
-         "answer":2,"lesson":"Mot de passe robuste : lettres, chiffres, symboles, au moins 12 caractères."}
+    "A2": [
+        {"question":"Select the correct word: She ___ happy.",
+         "options":["is","are","am","be"],
+         "answer":0,"lesson":"Use 'is' for third person singular."},
+    ],
+    "B1": [
+        {"question":"I have been living here ____ 2010.",
+         "options":["since","for","from","at"],
+         "answer":0,"lesson":"Use 'since' to indicate the starting point in time."},
+    ],
+    "B2": [
+        {"question":"Choose the correct sentence:",
+         "options":["He suggested to go","He suggested going","He suggested go","He suggested went"],
+         "answer":1,"lesson":"After 'suggest', use gerund (verb+ing)."},
+    ],
+    "C1": [
+        {"question":"Identify the correct idiom meaning 'very easy':",
+         "options":["A piece of cake","Break a leg","Hit the sack","Let the cat out of the bag"],
+         "answer":0,"lesson":"'A piece of cake' means something is very easy."},
     ]
 }
 
@@ -36,17 +49,18 @@ QUIZ_DATA = {
 current_quiz = None
 quiz_answers = {}
 quiz_task = None
+session_task = None
+session_running = False
 
 # ======================= FONCTIONS =======================
-async def send_quiz(bot, chat_id, theme, started_by):
+async def send_quiz(bot, chat_id, q):
+    """Envoie une question avec compte à rebours et collecte des réponses."""
     global current_quiz, quiz_answers, quiz_task
-
-    q = random.choice(QUIZ_DATA[theme])
     quiz_answers = {}
 
     poll_message = await bot.send_poll(
         chat_id=chat_id,
-        question=f"⏳ {QUIZ_DURATION}s - {q['question']}\n👨‍🏫 Lancé par: {started_by}",
+        question=f"⏳ {QUIZ_DURATION}s - {q['question']}",
         options=q["options"],
         type="quiz",
         correct_option_id=q["answer"],
@@ -54,34 +68,46 @@ async def send_quiz(bot, chat_id, theme, started_by):
     )
 
     current_quiz = {"question": q, "message_id": poll_message.message_id, "chat_id": chat_id}
+    quiz_task = asyncio.create_task(countdown(bot, chat_id, poll_message.message_id, q))
 
-    # Timer automatique
-    quiz_task = asyncio.create_task(end_quiz(bot))
+async def countdown(bot, chat_id, message_id, q):
+    """Compte à rebours visible toutes les TIMER_INTERVAL secondes."""
+    global current_quiz, quiz_answers, quiz_task
+    remaining = QUIZ_DURATION
+    try:
+        while remaining > 0:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"⏳ {remaining}s - {q['question']}"
+            )
+            await asyncio.sleep(TIMER_INTERVAL)
+            remaining -= TIMER_INTERVAL
+        await end_quiz(bot)
+    except asyncio.CancelledError:
+        pass
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collecte les réponses des utilisateurs."""
     global quiz_answers, current_quiz
     if not current_quiz:
         return
-
     user = update.effective_user
     ans = update.poll_answer.option_ids[0] if update.poll_answer.option_ids else None
     quiz_answers[user.full_name] = ans
 
 async def end_quiz(bot: Bot, forced=False):
-    global current_quiz, quiz_answers, quiz_task
+    """Affiche la réponse, le mini-cours et le classement."""
+    global current_quiz, quiz_answers, quiz_task, session_running, session_task
     if not current_quiz:
         return
-
-    # Attendre la durée du quiz si ce n’est pas forcé
-    if not forced:
-        await asyncio.sleep(QUIZ_DURATION)
 
     q = current_quiz["question"]
     chat_id = current_quiz["chat_id"]
 
     correct_id = q["answer"]
     winners = [name for name, ans in quiz_answers.items() if ans == correct_id]
-    classement = "\n".join([f"{i+1}. {name}" for i, name in enumerate(winners)]) if winners else "❌ Personne n’a trouvé."
+    classement = "\n".join([f"{i+1}.{name}" for i, name in enumerate(winners)]) if winners else "❌ Personne n’a trouvé."
 
     await bot.send_message(
         chat_id=chat_id,
@@ -96,36 +122,72 @@ async def end_quiz(bot: Bot, forced=False):
         quiz_task.cancel()
         quiz_task = None
 
+    # Passer à la prochaine question si session active
+    if session_running and session_task and not forced:
+        session_task.get_loop().call_soon_threadsafe(lambda: None)  # pour relancer la boucle
+
+# ======================= SESSION =======================
+async def session(bot: Bot, chat_id, n_questions):
+    """Lance n_questions consécutives de niveaux variés."""
+    global session_running, session_task
+    session_running = True
+    session_task = asyncio.current_task()
+
+    levels = list(QUIZ_DATA.keys())
+    for i in range(n_questions):
+        if not session_running:
+            break
+        level = random.choice(levels)
+        question = random.choice(QUIZ_DATA[level])
+        await send_quiz(bot, chat_id, question)
+        # Attendre que la question se termine
+        while current_quiz:
+            await asyncio.sleep(1)
+
+    session_running = False
+
 # ======================= COMMANDES =======================
-async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande admin: /startsession [nombre]"""
+    global session_running
     chat = await context.bot.get_chat(GROUP_ID)
     member = await chat.get_member(update.effective_user.id)
-    if not (member.status in ["administrator", "creator"]):
-        await update.message.reply_text("❌ Seuls les administrateurs peuvent lancer un quiz.")
+    if not member.status in ["administrator", "creator"]:
+        await update.message.reply_text("❌ Seuls les admins peuvent lancer une session.")
         return
 
-    theme = context.args[0].lower() if context.args else random.choice(list(QUIZ_DATA.keys()))
-    if theme not in QUIZ_DATA:
-        await update.message.reply_text("⚠️ Thème inconnu. Utilise /quiz english ou /quiz cyber.")
+    if session_running:
+        await update.message.reply_text("⚠️ Une session est déjà en cours.")
         return
 
-    await send_quiz(context.bot, update.effective_chat.id, theme, update.effective_user.full_name)
+    try:
+        n_questions = int(context.args[0]) if context.args else 5
+    except:
+        n_questions = 5
 
-async def stop_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"✅ Session de {n_questions} questions lancée !")
+    asyncio.create_task(session(context.bot, update.effective_chat.id, n_questions))
+
+async def stop_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande admin: /stopsession"""
+    global session_running, current_quiz
     chat = await context.bot.get_chat(GROUP_ID)
     member = await chat.get_member(update.effective_user.id)
-    if not (member.status in ["administrator", "creator"]):
-        await update.message.reply_text("❌ Seuls les administrateurs peuvent arrêter un quiz.")
+    if not member.status in ["administrator", "creator"]:
+        await update.message.reply_text("❌ Seuls les admins peuvent arrêter la session.")
         return
 
-    await end_quiz(context.bot, forced=True)
+    session_running = False
+    if current_quiz:
+        await end_quiz(context.bot, forced=True)
+    await update.message.reply_text("⏹️ Session arrêtée !")
 
 # ======================= MAIN =======================
 def main():
-    print("🤖 Bot prêt : /quiz, /quiz english, /quiz cyber, /stopquiz")
+    print("🤖 Bot prêt : /startsession [n], /stopsession")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("quiz", quiz_command))
-    app.add_handler(CommandHandler("stopquiz", stop_quiz_command))
+    app.add_handler(CommandHandler("startsession", start_session))
+    app.add_handler(CommandHandler("stopsession", stop_session))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.run_polling()
 
