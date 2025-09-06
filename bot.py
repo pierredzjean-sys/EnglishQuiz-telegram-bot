@@ -2,140 +2,61 @@
 # -*- coding: utf-8 -*-
 
 import os
-import asyncio
 import random
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    ContextTypes, PollAnswerHandler
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID", "-1002882014486"))  # Ton groupe
-QUIZ_DURATION = 20  # en secondes
+GROUP_ID = int(os.getenv("GROUP_ID", "-1002882014486"))  # Mets ton vrai ID de groupe
+PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # l’URL Render de ton service
 
-# ================= QUIZ DATA =================
+# ================= QUIZ DATA (exemple A1-C1 simplifié) =================
 QUIZ_DATA = [
-    {
-        "question": "Choose the correct form: She ____ to school every day.",
-        "options": ["go", "goes", "going", "gone"],
-        "answer": 1,
-        "lesson": "Avec 'she/he/it', on ajoute -s : She goes to school."
-    },
-    {
-        "question": "What is the opposite of 'difficult'?",
-        "options": ["Hard", "Easy", "Complicated", "Tough"],
-        "answer": 1,
-        "lesson": "Le contraire de 'difficult' est 'easy'."
-    },
-    {
-        "question": "Complete: If I ____ time, I will help you.",
-        "options": ["have", "had", "will have", "having"],
-        "answer": 0,
-        "lesson": "Conditionnel réel (1st conditional) : If + present simple, will + base verbale."
-    }
-    # 👉 Ajoute ici plus de questions A1 → C1
+    {"question": "Choose the correct form: She ____ to school every day.",
+     "options": ["go", "goes", "going", "gone"],
+     "answer": 1, "lesson": "Avec 'she/he/it', on ajoute -s : She goes to school."},
+
+    {"question": "What is the opposite of 'difficult'?",
+     "options": ["Hard", "Easy", "Complicated", "Tough"],
+     "answer": 1, "lesson": "Le contraire de 'difficult' est 'easy'."}
 ]
 
-# ================= ETAT GLOBAL =================
-active_session = False
-scores = {}
-current_poll_id = None
-current_correct = None
+# ================= HANDLERS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot prêt. Tape /quiz pour lancer un quiz !")
 
-
-# ================= FONCTIONS =================
-async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active_session, scores
-
-    if active_session:
-        await update.message.reply_text("⚠️ Une session est déjà en cours.")
-        return
-
-    try:
-        n = int(context.args[0]) if context.args else 5
-    except ValueError:
-        n = 5
-
-    scores = {}
-    active_session = True
-    await update.message.reply_text(f"🎯 Session démarrée avec {n} questions !")
-
-    for i in range(n):
-        if not active_session:
-            break
-        await send_quiz(context)
-        await asyncio.sleep(QUIZ_DURATION + 5)  # temps du quiz + pause entre les questions
-
-    if active_session:
-        await stop_session(update, context)
-
-
-async def stop_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active_session
-    if not active_session:
-        await update.message.reply_text("⚠️ Pas de session en cours.")
-        return
-
-    active_session = False
-    if scores:
-        classement = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        msg = "🏆 Résultats finaux :\n\n"
-        for i, (user, pts) in enumerate(classement, 1):
-            msg += f"{i}. {user} — {pts} pts\n"
-    else:
-        msg = "Aucun participant n’a répondu 😅."
-
-    await context.bot.send_message(GROUP_ID, msg)
-
-
-async def send_quiz(context: ContextTypes.DEFAULT_TYPE):
-    global current_poll_id, current_correct
-
+async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = random.choice(QUIZ_DATA)
-    poll = await context.bot.send_poll(
-        chat_id=GROUP_ID,
+    poll = await update.message.reply_poll(
         question=q["question"],
         options=q["options"],
         type="quiz",
         correct_option_id=q["answer"],
         is_anonymous=False
     )
-    current_poll_id = poll.poll.id
-    current_correct = q["answer"]
+    # Sauvegarde la bonne réponse pour l’expliquer ensuite
+    context.chat_data["last_quiz"] = q
 
-    # Affichage du compte à rebours
-    for sec in range(QUIZ_DURATION, 0, -5):
-        await asyncio.sleep(5)
-        await context.bot.send_message(GROUP_ID, f"⏳ Il reste {sec} sec...")
-
-    # Réponse
-    await context.bot.send_message(
-        GROUP_ID,
-        f"✅ Réponse : {q['options'][q['answer']]}\n📘 Cours : {q['lesson']}"
-    )
-
-
-async def receive_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global scores
-    answer = update.poll_answer
-    user = answer.user.first_name
-
-    if answer.option_ids and answer.option_ids[0] == current_correct:
-        scores[user] = scores.get(user, 0) + 1
-
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🛑 Session stoppée par l’admin.")
 
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("startsession", start_session))
-    app.add_handler(CommandHandler("stopsession", stop_session))
-    app.add_handler(PollAnswerHandler(receive_poll_answer))
-    print("🤖 Bot prêt : /startsession [n], /stopsession")
-    app.run_polling()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("quiz", quiz))
+    app.add_handler(CommandHandler("stop", stop))
 
+    # Lancement en webhook (pas polling !)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    )
 
-if __name__ == "__main__":
+if name == "__main__":
     main()
